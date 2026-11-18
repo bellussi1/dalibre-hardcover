@@ -138,12 +138,22 @@ function jsonResponse(body, status = 200) {
   assert.equal(byIsbn.identifiers.hardcover, "427537");
 }
 
+function assertDalibre063Form(form) {
+  assert.ok(form && typeof form === "object");
+  const allowed = new Set(["submit", "fields", "remember"]);
+  for (const k of Object.keys(form)) {
+    assert.ok(allowed.has(k), `unexpected form key ${k} (breaks Dalibre <=0.6.3)`);
+  }
+  assert.equal("note" in form, false, "must not send note (breaks Dalibre <=0.6.3)");
+}
+
 // 3. Action: sync-from-hardcover matches by hardcover id, ISBN, and normalized (edition/book title, "Last, First" author)
 {
   globalThis.dalibre.settings = { apiKey: "pat-123", tagPrefix: "Hardcover: " };
   let capturedForm = null;
   globalThis.dalibre.form = async (form) => {
     capturedForm = form;
+    assertDalibre063Form(form);
     return {
       syncTags: true,
       syncRatings: true,
@@ -183,12 +193,34 @@ function jsonResponse(body, status = 200) {
         formats: ["EPUB"],
         hasCover: false,
       };
+      yield {
+        id: 104,
+        title: "Mistborn: Secret History",
+        authors: ["Brandon Sanderson"],
+        tags: ["PT-BR"],
+        identifiers: {},
+        rating: 0,
+        formats: ["EPUB"],
+        hasCover: false,
+      };
+      yield {
+        id: 105,
+        title: "Empire of the Dawn",
+        authors: ["Jay Kristoff"],
+        tags: ["PT-BR"],
+        languages: ["por"],
+        identifiers: {},
+        rating: 0,
+        formats: ["EPUB"],
+        hasCover: false,
+      };
     },
   };
 
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     assert.ok(body.query.includes("user_books"));
+    assert.ok(body.query.includes("language { code2 }"), "must request edition language.code2");
     return jsonResponse({
       data: {
         me: [
@@ -200,7 +232,7 @@ function jsonResponse(body, status = 200) {
                 id: 15108906,
                 status_id: 2,
                 rating: null,
-                edition: { id: 32672942, title: "O Aprendiz de Assassino", isbn_13: "9788554515263", isbn_10: "8554515269" },
+                edition: { id: 32672942, title: "O Aprendiz de Assassino", isbn_13: "9788554515263", isbn_10: "8554515269", language: { code2: "pb" } },
                 book: { id: 427336, title: "Assassin's Apprentice", contributions: [{ author: { name: "Robin Hobb" } }] },
                 user_book_reads: [{ progress: 61.74, progress_pages: 305 }],
               },
@@ -208,8 +240,24 @@ function jsonResponse(body, status = 200) {
                 id: 15108907,
                 status_id: 3,
                 rating: 4.5,
-                edition: { id: 32116755, title: "Condição Artificial", isbn_13: "9788576577263", isbn_10: "8576577267" },
+                edition: { id: 32116755, title: "Condição Artificial", isbn_13: "9788576577263", isbn_10: "8576577267", language: { code2: "pb" } },
                 book: { id: 427537, title: "Artificial Condition", contributions: [{ author: { name: "Martha Wells" } }] },
+                user_book_reads: [],
+              },
+              {
+                id: 15108908,
+                status_id: 3,
+                rating: 4.5,
+                edition: { id: 990001, title: "Mistborn: The Final Empire", isbn_13: "9780765311788", language: { code2: "en" } },
+                book: { id: 369692, title: "Mistborn: The Final Empire", contributions: [{ author: { name: "Brandon Sanderson" } }] },
+                user_book_reads: [],
+              },
+              {
+                id: 15108909,
+                status_id: 3,
+                rating: 5.0,
+                edition: { id: 990002, title: "Empire of the Dawn", isbn_13: "9781250245380", language: { code2: "en" } },
+                book: { id: 1801904, title: "Empire of the Dawn", contributions: [{ author: { name: "Jay Kristoff" } }] },
                 user_book_reads: [],
               },
             ],
@@ -220,28 +268,56 @@ function jsonResponse(body, status = 200) {
   };
 
   const res = await run("sync-from-hardcover", { books: [] });
-  assert.ok(capturedForm && (!capturedForm.note || capturedForm.note.length <= 120));
-  assert.ok(res.message.includes("2"));
+  assertDalibre063Form(capturedForm);
+  assert.ok(res.message.includes("3"));
   assert.equal(res.groups.length, 2);
   assert.equal(res.groups[0].title, "Currently Reading");
   assert.equal(res.groups[0].books[0].id, 101);
   assert.ok(res.groups[0].books[0].note.includes("62%"));
 
-  assert.equal(res.changes.length, 2);
+  assert.equal(res.changes.length, 3);
+  assert.equal(res.changes.find((c) => c.book === 104), undefined, "Mistborn: Secret History must not match The Final Empire");
   const c101 = res.changes.find((c) => c.book === 101);
   assert.deepEqual(c101.metadata.identifiers, { hardcover: "427336", isbn: "9788554515263" });
   assert.deepEqual(c101.metadata.tags, ["Fantasy", "Hardcover: Reading"]);
 
   const c102 = res.changes.find((c) => c.book === 102);
-  assert.deepEqual(c102.metadata.identifiers, { isbn: "9788576577263", hardcover: "427537" });
+  assert.deepEqual(c102.metadata.identifiers, { hardcover: "427537" });
   assert.equal(c102.metadata.rating, 9);
   assert.deepEqual(c102.metadata.tags, ["Sci-Fi", "Hardcover: Read"]);
+
+  const c105 = res.changes.find((c) => c.book === 105);
+  assert.deepEqual(c105.metadata.identifiers, { hardcover: "1801904" }, "PT-BR book must not inherit English edition ISBN");
+  assert.equal(c105.metadata.rating, 10);
+  assert.deepEqual(c105.metadata.tags, ["PT-BR", "Hardcover: Read"]);
+
+  // Re-running sync when tags are already present in alphabetical order emits zero changes
+  globalThis.dalibre.library = {
+    async *books() {
+      yield {
+        id: 102,
+        title: "Condição Artificial",
+        authors: ["Martha Wells"],
+        tags: ["Fantasy", "Hardcover: Read", "PT-BR", "Sci-Fi"],
+        identifiers: { hardcover: "427537", isbn: "9788576577263" },
+        rating: 9,
+        formats: ["EPUB"],
+        hasCover: true,
+      };
+    },
+  };
+  const noopRes = await run("sync-from-hardcover", { books: [] });
+  assert.equal(noopRes.changes.length, 0, "must not emit reorder-only tag changes when status tag is already present");
+  assert.equal(noopRes.groups.length, 1);
 }
 
 // 4. Action: set-hardcover-status updates existing user_book and inserts new user_book with edition_id
 {
   globalThis.dalibre.settings = { apiKey: "pat-123", tagPrefix: "Hardcover: " };
-  globalThis.dalibre.form = async () => ({ status: "3", rating: "4.5" });
+  globalThis.dalibre.form = async (form) => {
+    assertDalibre063Form(form);
+    return { status: "3", rating: "4.5" };
+  };
 
   const mutations = [];
   globalThis.fetch = async (_url, init) => {

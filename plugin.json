@@ -2,7 +2,7 @@
   "$schema": "./plugin.schema.json",
   "id": "io.github.bellussi1.hardcover",
   "name": "Hardcover",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "api": 1,
   "dalibre": ">=0.4.0",
   "description": "Fetch metadata and sync reading status & ratings with Hardcover (KOReader-friendly)",

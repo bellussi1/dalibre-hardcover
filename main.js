@@ -139,7 +139,6 @@ export async function run(action, input) {
 async function runSyncFromHardcover() {
   const answers = await dalibre.form({
     submit: "Sync from Hardcover",
-    note: "Matches by hardcover id, ISBN or title/author. Progress shows in grouped lists.",
     remember: true,
     fields: [
       { key: "syncTags", title: "Add status tags (Reading, Want to Read, Read, DNF)", type: "toggle", value: true },
@@ -209,7 +208,6 @@ async function runSetStatus(books) {
 
   const answers = await dalibre.form({
     submit: "Update Hardcover",
-    note: "Requires your Hardcover API token in plugin settings.",
     remember: true,
     fields: [
       {
@@ -346,11 +344,19 @@ async function runSetStatus(books) {
     /** @type {Dalibre.Changes} */
     const meta = {};
     let hasMeta = false;
-    const idsPatch = { ...(item.book.identifiers ?? {}) };
-    if (idsPatch.hardcover !== String(item.hcBookId) || (item.isbn && !cleanISBN(idsPatch.isbn ?? ""))) {
-      idsPatch.hardcover = String(item.hcBookId);
-      if (item.isbn && !cleanISBN(idsPatch.isbn ?? "")) idsPatch.isbn = item.isbn;
-      meta.identifiers = idsPatch;
+    /** @type {Record<string, string>} */
+    const idsDelta = {};
+    let hasIdsDelta = false;
+    if (String(item.book.identifiers?.hardcover ?? "") !== String(item.hcBookId)) {
+      idsDelta.hardcover = String(item.hcBookId);
+      hasIdsDelta = true;
+    }
+    if (item.isbn && !cleanISBN(item.book.identifiers?.isbn ?? "")) {
+      idsDelta.isbn = item.isbn;
+      hasIdsDelta = true;
+    }
+    if (hasIdsDelta) {
+      meta.identifiers = idsDelta;
       hasMeta = true;
     }
     if (prefix) {
@@ -453,7 +459,7 @@ async function fetchMyUserBooks() {
         status_id
         rating
         edition_id
-        edition { id title isbn_13 isbn_10 }
+        edition { id title isbn_13 isbn_10 language { code2 } }
         book { id title slug contributions { author { name } } }
         user_book_reads(limit: 1, order_by: {id: desc}) { progress progress_pages }
       }
@@ -575,7 +581,9 @@ function pickBestEdition(editions, targetIsbn, preferredLang) {
 function buildHardcoverIndex(userBooks) {
   const byHcId = new Map();
   const byIsbn = new Map();
-  const byTitleAuthor = new Map();
+  const byExactTitleAuthor = new Map();
+  const byNoColonAuthor = new Map();
+  const byColonBaseAuthor = new Map();
 
   for (const ub of userBooks) {
     const hid = ub?.book?.id ? String(ub.book.id) : "";
@@ -587,15 +595,26 @@ function buildHardcoverIndex(userBooks) {
       if (c13 && !byIsbn.has(c13)) byIsbn.set(c13, ub);
     }
     const hcAuthors = (ub?.book?.contributions ?? []).map((/** @type {any} */ c) => canonicalAuthor(c?.author?.name ?? "")).filter(Boolean);
-    const titles = [ub?.book?.title, ub?.edition?.title].map(normTitle).filter(Boolean);
-    for (const t of titles) {
+    for (const rawTitle of [ub?.book?.title, ub?.edition?.title]) {
+      const s = String(rawTitle ?? "").trim();
+      const nt = normTitle(s);
+      if (!nt) continue;
+      const hasColon = s.includes(":");
+      const base = hasColon ? normTitle(s.split(":")[0]) : nt;
       for (const a of hcAuthors) {
-        const key = `${t}\0${a}`;
-        if (!byTitleAuthor.has(key)) byTitleAuthor.set(key, ub);
+        const key = `${nt}\0${a}`;
+        if (!byExactTitleAuthor.has(key)) byExactTitleAuthor.set(key, ub);
+        if (!hasColon) {
+          const ncKey = `${nt}\0${a}`;
+          if (!byNoColonAuthor.has(ncKey)) byNoColonAuthor.set(ncKey, ub);
+        } else if (base.length >= 5) {
+          const cbKey = `${base}\0${a}`;
+          if (!byColonBaseAuthor.has(cbKey)) byColonBaseAuthor.set(cbKey, ub);
+        }
       }
     }
   }
-  return { byHcId, byIsbn, byTitleAuthor };
+  return { byHcId, byIsbn, byExactTitleAuthor, byNoColonAuthor, byColonBaseAuthor };
 }
 
 /** @param {Dalibre.BookInfo} book @param {ReturnType<typeof buildHardcoverIndex>} index */
@@ -611,16 +630,39 @@ function matchLibraryBook(book, index) {
   }
 
   const authors = (book.authors ?? []).map(canonicalAuthor).filter(Boolean);
-  const fullTitle = normTitle(book.title);
-  const shortTitle = normTitle(String(book.title ?? "").split(":")[0]);
-  for (const t of [fullTitle, shortTitle]) {
-    if (!t) continue;
-    for (const a of authors) {
-      const hit = index.byTitleAuthor.get(`${t}\0${a}`);
-      if (hit) return hit;
+  const rawTitle = String(book.title ?? "");
+  const fullTitle = normTitle(rawTitle);
+  const hasColon = rawTitle.includes(":");
+  const baseTitle = hasColon ? normTitle(rawTitle.split(":")[0]) : fullTitle;
+
+  for (const a of authors) {
+    if (fullTitle) {
+      const exact = index.byExactTitleAuthor.get(`${fullTitle}\0${a}`);
+      if (exact) return exact;
+    }
+    if (hasColon && baseTitle.length >= 5) {
+      const subHit = index.byNoColonAuthor.get(`${baseTitle}\0${a}`);
+      if (subHit) return subHit;
+    } else if (!hasColon && fullTitle.length >= 5) {
+      const baseHit = index.byColonBaseAuthor.get(`${fullTitle}\0${a}`);
+      if (baseHit) return baseHit;
     }
   }
   return null;
+}
+
+/** @param {Dalibre.BookInfo} book */
+function bookLangBucket(book) {
+  for (const l of book.languages ?? []) {
+    const n = normalizeLangCode(l);
+    if (n === "pt" || n === "en") return n;
+  }
+  for (const t of book.tags ?? []) {
+    const u = String(t).trim().toUpperCase();
+    if (u === "PT-BR" || u === "PT-PT" || u === "PT") return "pt";
+    if (u === "EN" || u === "ENG") return "en";
+  }
+  return "";
 }
 
 /**
@@ -635,18 +677,27 @@ function buildSyncPatch(book, ub, opts) {
   const meta = {};
   let changed = false;
 
-  const idsPatch = { ...(book.identifiers ?? {}) };
+  /** @type {Record<string, string>} */
+  const idsDelta = {};
+  let hasIdsDelta = false;
   const targetHc = String(ub.book?.id ?? "");
   const edIsbn = cleanISBN(ub.edition?.isbn_13 || ub.edition?.isbn_10 || "");
-  if (targetHc && idsPatch.hardcover !== targetHc) {
-    idsPatch.hardcover = targetHc;
+  if (targetHc && String(book.identifiers?.hardcover ?? "") !== targetHc) {
+    idsDelta.hardcover = targetHc;
+    hasIdsDelta = true;
+  }
+  if (opts.fillMissingIsbn && edIsbn && !cleanISBN(book.identifiers?.isbn ?? "")) {
+    const bLang = bookLangBucket(book);
+    const eLang = normalizeLangCode(ub.edition?.language?.code2);
+    if (!bLang || !eLang || bLang === eLang) {
+      idsDelta.isbn = edIsbn;
+      hasIdsDelta = true;
+    }
+  }
+  if (hasIdsDelta) {
+    meta.identifiers = idsDelta;
     changed = true;
   }
-  if (opts.fillMissingIsbn && edIsbn && !cleanISBN(idsPatch.isbn ?? "")) {
-    idsPatch.isbn = edIsbn;
-    changed = true;
-  }
-  if (changed) meta.identifiers = idsPatch;
 
   const info = STATUS_INFO[Number(ub.status_id || 0)];
   if (opts.syncTags && opts.prefix && info) {
@@ -673,9 +724,8 @@ function mergeStatusTag(current, prefix, label) {
   const target = `${prefix}${label}`;
   const lowerPrefix = prefix.toLowerCase();
   const kept = current.filter((t) => !t.toLowerCase().startsWith(lowerPrefix));
-  const next = [...kept, target];
-  if (next.length === current.length && next.every((v, i) => v === current[i])) return null;
-  return next;
+  if (current.includes(target) && kept.length === current.length - 1) return null;
+  return [...kept, target];
 }
 
 /** @param {any} ub */
