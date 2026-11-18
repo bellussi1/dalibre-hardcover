@@ -1,0 +1,69 @@
+{
+  "$schema": "./plugin.schema.json",
+  "id": "io.github.bellussi1.hardcover",
+  "name": "Hardcover",
+  "version": "1.0.0",
+  "api": 1,
+  "dalibre": ">=0.4.0",
+  "description": "Fetch metadata and sync reading status & ratings with Hardcover (KOReader-friendly)",
+  "author": "Enzo Bellussi",
+  "homepage": "https://github.com/bellussi1/dalibre-hardcover",
+  "license": "MIT",
+  "icon": "bookmark",
+  "capabilities": {
+    "metadata": {
+      "fields": [
+        "title",
+        "authors",
+        "series",
+        "tags",
+        "publisher",
+        "pubdate",
+        "language",
+        "identifiers",
+        "cover",
+        "description"
+      ]
+    },
+    "actions": [
+      {
+        "id": "sync-from-hardcover",
+        "title": "Sync from Hardcover…",
+        "icon": "refresh",
+        "scope": "library"
+      },
+      {
+        "id": "set-hardcover-status",
+        "title": "Set Hardcover status…",
+        "icon": "bookmark",
+        "scope": "books",
+        "books": {
+          "min": 1
+        }
+      }
+    ]
+  },
+  "permissions": {
+    "hosts": [
+      "api.hardcover.app",
+      "assets.hardcover.app"
+    ],
+    "library": "read"
+  },
+  "settings": [
+    {
+      "key": "apiKey",
+      "title": "API token",
+      "type": "secret",
+      "required": true,
+      "description": "Personal access token from hardcover.app/account/api."
+    },
+    {
+      "key": "tagPrefix",
+      "title": "Status tag prefix",
+      "type": "text",
+      "default": "Hardcover: ",
+      "description": "Prefix for reading status tags in Dalibre (leave empty to skip status tags)."
+    }
+  ]
+}
